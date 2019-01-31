@@ -12,10 +12,10 @@ import os
 import librosa
 from torch.utils import data
 
-path = "/home/michael/Downloads/ADOS1002_clips/"
+path = "/media/michael/DATA/Downloads/ADOS/ADOS1002_clips/"
 
 num_epochs = 100
-batch_size = 128
+batch_size = 64
 learning_rate = 1e-3
 
 counter = 0
@@ -38,9 +38,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class DCVAE(nn.Module):
     def __init__(self, num_latent):
         super(DCVAE, self).__init__()
-        self.conv1 = nn.Conv2d(1, 64, (1), 1, 0)
-        self.norm1 = nn.BatchNorm2d(64)
-        self.conv2 = nn.Conv2d(64, 128, (3,1), 2, 0)
+        self.conv1 = nn.Conv2d(1, 256, (1), 1, 0)
+        self.norm1 = nn.BatchNorm2d(256)
+        self.conv2 = nn.Conv2d(256, 128, (3,1), 2, 0)
         self.norm2 = nn.BatchNorm2d(128)
         self.conv3 = nn.Conv2d(128, 64, (3,1), 2, 0)
         self.norm3 = nn.BatchNorm2d(64)
@@ -77,13 +77,17 @@ model = DCVAE(32).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)
 
+### getting negative loss because the spectograms are not normalized
+#Tried normalizing but encountered errors and I could not solve it
+#Maybe you can try?
+#Or maybe an error on my part with the loss calculation
 def lossfn(x, target, mean, logvar):
     bce = nn.BCELoss()
     bce_loss = bce(x, target)
     
     scaling_factor = out.shape[0]*out.shape[1]*out.shape[2]*out.shape[3]
     
-    kl_loss = -.05 * torch.sum(1 + logvar - mean**2 - torch.exp(logvar))
+    kl_loss = -.5 * torch.sum(1 + logvar - mean**2 - torch.exp(logvar))
     kl_loss /= scaling_factor
     
     return bce_loss + kl_loss
@@ -93,8 +97,18 @@ for epoch in range(num_epochs):
     for idx, (spec) in enumerate(dataSet):
         optimizer.zero_grad()
         out, mean, logvar = model(spec.cuda())
-        out = out.reshape(128,1,513,29)
+        if out.shape[0] == batch_size:
+            out = out.reshape(batch_size,1,513,29)
+        else:
+            out = out.reshape(out.shape[0],1,513,29)
         loss = lossfn(out, spec.cuda(), mean, logvar)
         loss.backward()
         optimizer.step()
+        torch.cuda.empty_cache()
     print(loss)
+
+model = model.eval()
+recon, _, _ = model(torch.cuda.FloatTensor(specs[1].reshape(1,1,513,29)))
+recon= recon.cpu()
+recon = recon.detach().numpy()
+recon = recon.reshape(1,513,29)
