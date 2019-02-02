@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Created on Thu Jan 31 16:02:04 2019
 @author: michael
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,12 +11,15 @@ import numpy as np
 import os
 import librosa
 from torch.utils import data
+from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
 
 path = "/home/michael/Downloads/ADOS1002_clips/"
 
-num_epochs = 500
-batch_size = 32
-learning_rate = 1e-5
+num_epochs = 1500
+batch_size = 16
+learning_rate = 1e-4
 hop_size = 2048
 n_fft = int(512 / 2)
 
@@ -46,25 +49,32 @@ class DCVAE(nn.Module):
         self.norm2 = nn.BatchNorm2d(128)
         self.conv3 = nn.Conv2d(128, 64, (1,1), 1)
         self.norm3 = nn.BatchNorm2d(64)
-        
+       
         self.fc1 = nn.Linear(1856, 928)
         self.fc2 = nn.Linear(928, 512)
-        self.fc3  = nn.Linear(512, 64)
-        self.latent = nn.Linear(64, num_latent)
-        self.mean = nn.Linear(64, num_latent)
-        self.var = nn.Linear(64, num_latent)
-        self.fc4 = nn.Linear(num_latent, 64)
-        self.fc5 = nn.Linear(64, 256)
-        self.fc6 = nn.Linear(256, 512)
-        self.fc7 = nn.Linear(512,928)
-        
+        self.fc31  = nn.Linear(512, num_latent)  
+        self.fc32  = nn.Linear(512, num_latent)
+
+        self.fc4 = nn.Linear(num_latent, 512)
+        self.fc5 = nn.Linear(512, 928)
+        self.fc6 = nn.Linear(928, 928)
+       
         self.deconv1 = nn.ConvTranspose2d(32, 64, (1,1), 1)
         self.norm4 = nn.BatchNorm2d(64)
         self.deconv2 = nn.ConvTranspose2d(64, 128, (1,1), 1)
         self.norm5 = nn.BatchNorm2d(128)
         self.deconv3 = nn.ConvTranspose2d(128, n_fft + 1, (1,1), 1)
         self.norm6 = nn.BatchNorm2d(n_fft + 1)
-        
+
+    def encode(self, x):
+        c1 = F.leaky_relu(self.norm1(self.conv1(x)))
+        c2 = F.leaky_relu(self.norm2(self.conv2(c1)))
+        c3 = F.leaky_relu(self.norm3(self.conv3(c2)))
+        ev = c3.view(c3.size(0), -1)
+        h1 = F.relu(self.fc1(ev))
+        h2 = F.relu(self.fc2(h1))
+        return F.relu(self.fc31(h2)), F.relu(self.fc32(h2))
+       
     def reparameterize(self, mean, var):
         std = var.mul(0.5).exp_()
         esp = torch.randn(*mean.size())
@@ -72,32 +82,21 @@ class DCVAE(nn.Module):
         esp = esp.to(device)
         z = mean + std * esp
         return z
-    
-    def trick(self, h):
-        mean_, var_ = self.mean(h), self.var(h)
-        z = self.reparameterize(mean_, var_)
-        return z, mean_, var_
-    
+
+    def decode(self, z):
+        h3 = F.relu(self.fc4(z))
+        h4 = F.relu(self.fc5(h3))
+        h5 = F.relu(self.fc6(h4))
+        dv = h5.view(-1, 32, 29, 1)  
+        dc1 = F.leaky_relu(self.norm4(self.deconv1(dv)))
+        dc2 = F.leaky_relu(self.norm5(self.deconv2(dc1)))
+        return F.sigmoid(self.norm6(self.deconv3(dc2)))
+
     def forward(self, x):
-        x = F.leaky_relu(self.norm1(self.conv1(x)))
-        x = F.leaky_relu(self.norm2(self.conv2(x)))
-        x = F.leaky_relu(self.norm3(self.conv3(x)))
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        latent, mean_h, var_h = self.trick(x)
-        x = latent
-        x = F.relu(self.fc4(x))
-        x = F.relu(self.fc5(x))
-        x = F.relu(self.fc6(x))
-        x = F.relu(self.fc7(x))
-        x = x.view(-1, 32, 29, 1)
-        x = F.leaky_relu(self.norm4(self.deconv1(x)))
-        x = F.leaky_relu(self.norm5(self.deconv2(x)))
-        x = F.sigmoid(self.norm6(self.deconv3(x)))
-        return x, mean_h, var_h, latent
-        
+       mean, var =  self.encode(x)
+       z = self.reparameterize(mean, var)
+       return self.decode(z), mean, var, z
+   
 model = DCVAE(16).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr = learning_rate)
@@ -117,6 +116,7 @@ def lossfn(x, target, mean, logvar):
     
     return bce_loss + kl_loss
 
+low_loss = 1
 for epoch in range(num_epochs):
     print("Epoch #" + str(epoch))
     for idx, (spec) in enumerate(dataSet):
@@ -129,11 +129,32 @@ for epoch in range(num_epochs):
         loss = lossfn(out, spec.cuda(), mean, logvar)
         loss.backward()
         optimizer.step()
+        optimizer.zero_grad()
         torch.cuda.empty_cache()
-    print(loss)
+    if loss > 0.0:
+            if loss < low_loss:
+                print('saving model')
+                torch.save(model.state_dict(), "/home/michael/Downloads/model/" + "model1")
+                low_loss = loss
+                print(loss)
+    
 
-model = model.eval()
-recon, _, _ = model(torch.cuda.FloatTensor(specs[1].reshape(1,1,513,29)))
-recon= recon.cpu()
-recon = recon.detach().numpy()
-recon = recon.reshape(1,513,29)
+infer = DCVAE(16).to(device)
+infer.load_state_dict(torch.load("/home/michael/Downloads/model/" + "model1"))
+infer.eval()
+latent = []
+for x in specs:
+    _, _, _, z = infer(torch.cuda.FloatTensor(x.reshape(1,1,257,29)))
+    z = z.cpu()
+    z = z.detach().numpy()
+    latent.append(z)
+#recon = recon.reshape(1,257,29)
+laten = np.array(latent)
+laten = laten.reshape(1541,16)
+latent_emb = TSNE(2).fit_transform(laten)
+kmeans = KMeans(n_clusters = 3, random_state = 0).fit(latent_emb[10:1540])
+y_means = kmeans.predict(latent_emb[0:9])
+plt.scatter(latent_emb[:,0], latent_emb[:, 1], c = y_means, s = 50, cmap = 'viridis')
+
+centers = kmeans.cluster_centers_
+plt.scatter(centers[:, 0], centers[:, 1], c = 'black', s = 200, alpha = 0.5)
